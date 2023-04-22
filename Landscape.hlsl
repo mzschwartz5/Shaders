@@ -2,6 +2,7 @@
 const float PI = 3.1415926535897932384626433832795;
 const float INVERSE_PI = 0.3183099; // 1/PI 
 float aspectRatio; // defined in main
+const float farClipPlane = 30.0;
 const float degreesToRads = (PI / 180.0);
 const float sunPhiDegrees = degreesToRads * 10.0;   // angle off horizon
 const float sunThetaDegrees = degreesToRads * 0.0;  // angle around UP direction
@@ -25,9 +26,10 @@ const vec3 hazeColor = vec3(1,1,1);
 const int terrain_resolution_factor = 9; // number of layers of increasingly higher frequency noise
 const float domainNoiseScaleFactor = 5.0;      // controls domain scale of noise pattern
 const float rangeNoiseScaleFactor = 3.0;       // controls range scale of noise pattern
-const vec3 atmosphericDecayFactor = .0020 * vec3( -1.5, -2.2, -5.0);
+const vec3 atmosphericDecayFactor = .004 * vec3( -1.5, -2.2, -5.0);
 
 // Render-target enums
+const int unknown_targetID = -1;
 const int mountain_targetID = 1;
 const int cloud_targetID = 2;
 
@@ -50,7 +52,6 @@ float pseudoRandomRange(float seed, float minRange, float maxRange) {
 vec2 smoothstepDeriv(vec2 pos) {
     return 6.0*pos*(1.0-pos);
 }
-
 
 // Continuous, smoothly varying noise function
 float noise(in vec2 position) { 
@@ -195,7 +196,7 @@ float cloudStrength(vec3 intersectionPosition) {
     return 0.5*smoothstep(-1.0, 8.0, fbm(2.0 * intersectionPosition.xz, 9));
 }
 
-float cloudSDF(in vec3 rayOrigin, in vec3 rayDirection) {
+float cloudIntersect(in vec3 rayOrigin, in vec3 rayDirection) {
     // Treat cloud as plane at y = cloudHeight
     // Equation of ray: ray_O + ray_D*t = (x,y,z)
     // Isolating the y component: ray_O_y + ray_D_y*t = cloudHeight
@@ -206,8 +207,8 @@ float cloudSDF(in vec3 rayOrigin, in vec3 rayDirection) {
 // Cast ray at shapes in the scene and see what it intersects
 // Returns ID of object it hit, if any. Also returns intersection distance as out param.
 int castRay(in vec3 rayOrigin, in vec3 rayDirection, out float dist) {
-    int ID = -1;
-    float maxT = 100.0; // far-clip plane 
+    int ID = unknown_targetID;
+    float maxT = farClipPlane; 
     float minT = 0.1;  // near-clip plane
     float dt = 0.1;
     float t, terrainSdfValue, cloudSdfValue;
@@ -239,10 +240,11 @@ int castRay(in vec3 rayOrigin, in vec3 rayDirection, out float dist) {
     }
 
     // If we didn't hit anything, we'll default to drawing clouds.
-    if (ID == -1) {
-        ID = cloud_targetID;
-        dist = cloudSDF(rayOrigin, rayDirection);
-        return ID;
+    if (ID == unknown_targetID) {
+        // The cloud intersection distance can be negative (if the ray direction points away from the clouds)
+        // We'll cheat a bit and use an absolute value to put it back in the positive range. Works well enough.
+        dist = abs(cloudIntersect(rayOrigin, rayDirection));
+        return cloud_targetID;
     }
     
     dist = t;
@@ -342,7 +344,7 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
    
     // Add atmosphere haze
     col = addAtmosphere(col, distIntersect);
-    
+
     // Smoothstep the color to make dark colors darker and light colors lighter
     // col = smoothstep(0.0, 1.0, col);
 
