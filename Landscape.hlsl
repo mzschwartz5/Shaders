@@ -7,16 +7,18 @@ const float sunPhiDegrees = degreesToRads * 10.0;   // angle off horizon
 const float sunThetaDegrees = degreesToRads * 0.0;  // angle around UP direction
 // direction of a beam of light from the sun
 const vec3 sun = normalize(vec3(-cos(sunPhiDegrees) * cos(sunThetaDegrees), -sin(sunPhiDegrees) * cos(sunThetaDegrees), -sin(sunThetaDegrees))); 
-const mat2 rotateTerrainMat = mat2(  0.80,  0.60,
-                                    -0.60,  0.80 ); // rotation numbers come from 3-4-5 pythagorean triple
+const float cloudHeight = 15.0;
+const mat2 fbmRotateMat = mat2(  0.80,  0.60,
+                                -0.60,  0.80 ); // rotation numbers come from 3-4-5 pythagorean triple
 
-const mat2 inverseRotateTerrainMat = mat2(0.80, -0.60,
-                                          0.60, 0.80);
+const mat2 inverseFbmRotateMat = mat2(0.80, -0.60,
+                                      0.60, 0.80);
 
 // Color palette
 const vec3 landColor = vec3(0.27, 0.18, 0.15);
-const vec3 snowColor = vec3(0.9);
-const vec3 skyColor = vec3(0.45, 0.72, 1.0);
+const vec3 grassColor = vec3(0.33, 0.50, 0.27);
+const vec3 skyColor = vec3(0.35, 0.62, 1.0);
+const vec3 cloudColor = vec3(1.0, 1.0, 1.0);
 const vec3 hazeColor = vec3(1,1,1);
 
 // Refinement factors
@@ -27,6 +29,7 @@ const vec3 atmosphericDecayFactor = .0020 * vec3( -1.5, -2.2, -5.0);
 
 // Render-target enums
 const int mountain_targetID = 1;
+const int cloud_targetID = 2;
 
 //====== Helper / Generic functions ======= //
 
@@ -50,8 +53,6 @@ vec2 smoothstepDeriv(vec2 pos) {
 
 
 // Continuous, smoothly varying noise function
-// N.b. by dividing input and multiplying output by same factor, we can scale the noise
-// without introducing distortion.
 float noise(in vec2 position) { 
     position /= domainNoiseScaleFactor;  
 
@@ -65,13 +66,12 @@ float noise(in vec2 position) {
     float c = pseudoRandom(ij + vec2(0,1));
     float d = pseudoRandom(ij + vec2(1,1));    
     
-
-    float height = a 
+    float noise = a 
         + (b-a)*smoothedPositionFract.x
         + (c-a)*smoothedPositionFract.y 
         + (a-b-c+d)*smoothedPositionFract.x*smoothedPositionFract.y; 
         
-    return rangeNoiseScaleFactor * height;
+    return rangeNoiseScaleFactor * noise;
 }
 
 vec2 noiseDeriv(in vec2 position) {
@@ -95,53 +95,62 @@ vec2 noiseDeriv(in vec2 position) {
 
 }
 
-//========== END helper functions =========//
-
-
 vec3 rayPosition(in vec3 rayOrigin, in vec3 rayDirection, in float t) {
     return (rayOrigin + (rayDirection * t));
 }
 
-// Sum of different frequency noise patterns (fourier series, basically)
-float terrainHeight(in vec2 position) {
-    float height = noise(position);
+// Fractal Brownian Motion - a type of noise made by combining
+// different frequency layers of base noise.
+float fbm(in vec2 seed, int iterations) {
+    float value = noise(seed);
     float domainScale = 1.0;
     float rangeScale = 1.0;
             
-    for (int i = 1; i < terrain_resolution_factor; i++) {
+    for (int i = 1; i < iterations; i++) {
         domainScale *= 2.0;
         rangeScale /= 2.0;
 
         // (Instead of matrix * matrix to get a new rotation matrix, computationally cheaper to do mat*vec mult)
-        position = rotateTerrainMat * position;
+        seed = fbmRotateMat * seed;
         
-        float height_i = rangeScale * noise(domainScale * position);
-        height += height_i;
+        float value_i = rangeScale * noise(domainScale * seed);
+        value += value_i;
     }
 
-    return height;
+    return value;
 }
 
-vec2 terrainDerivative(in vec2 position) {
-    vec2 derivs = noiseDeriv(position);
+vec2 fbm_deriv(in vec2 seed, int iterations) {
+    vec2 derivs = noiseDeriv(seed);
     float domainScale = 1.0;
     float rangeScale = 1.0;
 
     mat2 inverseRotation = mat2(1, 0, 0, 1);
             
-    for (int i = 1; i < terrain_resolution_factor; i++) {
+    for (int i = 1; i < iterations; i++) {
         domainScale *= 2.0;
         rangeScale /= 2.0;
 
         // (Instead of matrix * matrix to get a new rotation matrix, computationally cheaper to do mat*vec mult)
-        position = rotateTerrainMat * position;
-        inverseRotation *= inverseRotateTerrainMat;
+        seed = fbmRotateMat * seed;
+        inverseRotation *= inverseFbmRotateMat;
         
-        vec2 derivs_i = inverseRotation * domainScale * rangeScale * noiseDeriv(domainScale * position);
+        vec2 derivs_i = inverseRotation * domainScale * rangeScale * noiseDeriv(domainScale * seed);
         derivs += derivs_i;
     }
 
-    return derivs;    
+    return derivs;  
+}
+
+//========== END helper functions =========//
+
+// Sum of different frequency noise patterns (fourier series, basically)
+float terrainHeight(in vec2 position) {
+    return fbm(position, terrain_resolution_factor);
+}
+
+vec2 terrainDerivative(in vec2 position) {
+    return fbm_deriv(position, terrain_resolution_factor);
 }
 
 vec3 terrainNormal(in vec3 position) {
@@ -182,6 +191,18 @@ float terrainShadow(in vec3 terrainPosition) {
     return smoothstep(0.0, 1.0, minNormalizedTerrainSDF);
 }
 
+float cloudStrength(vec3 intersectionPosition) {
+    return 0.5*smoothstep(-1.0, 8.0, fbm(2.0 * intersectionPosition.xz, 9));
+}
+
+float cloudSDF(in vec3 rayOrigin, in vec3 rayDirection) {
+    // Treat cloud as plane at y = cloudHeight
+    // Equation of ray: ray_O + ray_D*t = (x,y,z)
+    // Isolating the y component: ray_O_y + ray_D_y*t = cloudHeight
+    // Thus we can easily solve for t, where the plane and ray intersect.
+    return (cloudHeight - rayOrigin.y) / rayDirection.y;
+}
+
 // Cast ray at shapes in the scene and see what it intersects
 // Returns ID of object it hit, if any. Also returns intersection distance as out param.
 int castRay(in vec3 rayOrigin, in vec3 rayDirection, out float dist) {
@@ -189,7 +210,7 @@ int castRay(in vec3 rayOrigin, in vec3 rayDirection, out float dist) {
     float maxT = 100.0; // far-clip plane 
     float minT = 0.1;  // near-clip plane
     float dt = 0.1;
-    float t, sdfValue;
+    float t, terrainSdfValue, cloudSdfValue;
     float oldT = minT;
     float oldSdfValue = 0.0;
     float intersectionThreshold = 0.0;
@@ -199,12 +220,12 @@ int castRay(in vec3 rayOrigin, in vec3 rayDirection, out float dist) {
         
         // Test for intersection with terrain by comparing heights.
         // As t increases, resolution decreseases, so we get less picky about what we consider a "hit"
-        sdfValue = terrainSDF(rayPos);
+        terrainSdfValue = terrainSDF(rayPos);
         intersectionThreshold = 0.001*t;
-        if (sdfValue <= intersectionThreshold) {
-            ID = 1;
+        if (terrainSdfValue <= intersectionThreshold) {
+            ID = mountain_targetID;
             // interpolate to give much more accurate results (otherwise shadows are banded and ugly)
-            t = oldT + (intersectionThreshold - oldSdfValue) * (t - oldT) / (sdfValue - oldSdfValue); 
+            t = oldT + (intersectionThreshold - oldSdfValue) * (t - oldT) / (terrainSdfValue - oldSdfValue); 
             break;
         }
         
@@ -214,7 +235,14 @@ int castRay(in vec3 rayOrigin, in vec3 rayDirection, out float dist) {
 
         // Save off old values to help interpolate
         oldT = t;
-        oldSdfValue = sdfValue;
+        oldSdfValue = terrainSdfValue;
+    }
+
+    // If we didn't hit anything, we'll default to drawing clouds.
+    if (ID == -1) {
+        ID = cloud_targetID;
+        dist = cloudSDF(rayOrigin, rayDirection);
+        return ID;
     }
     
     dist = t;
@@ -227,6 +255,10 @@ vec3 addAtmosphere(in vec3 color, in float dist) {
     return (haze * color) + ((1.0 - haze) * hazeColor); 
 }
 
+vec3 skyGradient(in vec3 rayDirection) {
+    return skyColor - 0.8*rayDirection.y;
+}
+
 vec3 reflectedSkyLight(in float terrainNormal_y) {
     return ((1.0 + terrainNormal_y) / 2.0) * (skyColor / 10.0);
 }
@@ -235,7 +267,7 @@ vec3 reflectedSkyLight(in float terrainNormal_y) {
 // Take a dot product with the _opposite_ sun direction as used for areas in the sun,
 // and use about a 10th of the reflected light to in these spots.
 vec3 reflectedGroundLight(in vec3 terrainNormal) {
-    return  (dot(terrainNormal, sun) * (landColor / 10.0));
+    return  (dot(terrainNormal, sun) * (landColor / 5.0));
 }
 
 // Shift UVs into -1:1 domain and scale to aspect ratio
@@ -247,10 +279,9 @@ vec2 scaleUV(in vec2 uv) {
 // the vertical normal is strong enough to support snow.
 vec3 landMaterial(float yNormal, float yPos) {
     // Mix land and snow
-    float lambda = smoothstep(0.08, 0.15, yNormal * exp(-(4.5-yPos)));
-    float snowHeight = pseudoRandomRange(yNormal, 2.0, 3.0);
+    float lambda = smoothstep(0.20, 0.25, yNormal);
 
-    return (yPos <= snowHeight) ? landColor : (landColor * (1.0 - lambda) + (snowColor * lambda));
+    return (landColor * (1.0 - lambda) + (landColor * lambda));
 }
 
 // Create a coordinate system for a camera placed at the ray cast origin and
@@ -279,8 +310,8 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     // The camera is a change-of-basis matrix that takes vectors in camera-space to
     // global-space. In camera-space we aim a ray at each UV coordinate,
     // then transform that ray into its global-space representation and cast it out. 
-    vec3 cameraPos = vec3(-5.0, 7.0, 0.0); 
-    vec2 cameraAngles = vec2(degreesToRads * 0.0, degreesToRads * -25.0);
+    vec3 cameraPos = vec3(-5.0, 3.0, 0.0); 
+    vec2 cameraAngles = vec2(degreesToRads * 0.0, degreesToRads * 15.0);
     mat3 camera = createCamera(cameraAngles);
     vec3 rayDirection = camera * normalize(vec3(scaledUV, -1.5)); 
 
@@ -290,7 +321,7 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     vec3 intersectionPosition = rayPosition(cameraPos, rayDirection, distIntersect);
     
     // Default color to sky
-    vec3 col = skyColor;
+    vec3 col = skyGradient(rayDirection);
     switch (intersectionID) {
     case mountain_targetID: 
         vec3 normal = terrainNormal(intersectionPosition);
@@ -300,7 +331,14 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
         vec3 reflectedGroundLight = reflectedGroundLight(normal);
         vec3 landColor = landMaterial(normal.y, intersectionPosition.y);
         col = (landColor * sun_shading * shadow) + reflectedSkyLight + reflectedGroundLight;
+        break;
+    case cloud_targetID:
+        float cloudMixStrength = cloudStrength(intersectionPosition);
+        col = (col * (1.0 - cloudMixStrength)) + (cloudMixStrength * cloudColor);
+        // col = vec3(cloudMixStrength);
+        break;
     }
+
    
     // Add atmosphere haze
     col = addAtmosphere(col, distIntersect);
