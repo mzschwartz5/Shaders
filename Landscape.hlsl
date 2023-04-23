@@ -24,9 +24,9 @@ const vec3 hazeColor = vec3(1,1,1);
 
 // Refinement factors
 const int terrain_resolution_factor = 9; // number of layers of increasingly higher frequency noise
-const float domainNoiseScaleFactor = 5.0;      // controls domain scale of noise pattern
+const float domainNoiseScaleFactor = 4.0;      // controls domain scale of noise pattern
 const float rangeNoiseScaleFactor = 3.0;       // controls range scale of noise pattern
-const vec3 atmosphericDecayFactor = .004 * vec3( -1.5, -2.2, -5.0);
+const vec3 atmosphericDecayFactor = .004 * vec3( -1.5, -2.2, -1.5);
 
 // Render-target enums
 const int unknown_targetID = -1;
@@ -258,7 +258,9 @@ vec3 addAtmosphere(in vec3 color, in float dist) {
 }
 
 vec3 skyGradient(in vec3 rayDirection) {
-    return skyColor - 0.8*rayDirection.y;
+    vec3 topColor = vec3(0.81, 0.29, 0.58);
+    vec3 bottomColor = vec3(0.95, 0.68, 0.38);
+    return (topColor * rayDirection.y) + (bottomColor * (1.0 - rayDirection.y));
 }
 
 vec3 reflectedSkyLight(in float terrainNormal_y) {
